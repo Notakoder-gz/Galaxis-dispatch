@@ -34,9 +34,14 @@ class Dispatcher:
 
         self.battery = 0
         self.task_mode = 0 # 0=Idle, 2=Moving/Executing
+        self.loop_queue = False
 
         # Thread safety lock
         self.lock = threading.Lock()
+
+    def set_loop_queue(self, state):
+        with self.lock:
+            self.loop_queue = state
 
     def set_log_callback(self, cb):
         self.log_callback = cb
@@ -112,10 +117,11 @@ class Dispatcher:
                             self.current_pos["y"] = content["CurY"]
                             telemetry_updated = True
 
-                if "CurLogicX" in content and "CurLogicY" in content:
+                info = content.get("Info", {})
+                if "CurLogicX" in info and "CurLogicY" in info:
                     with self.lock:
-                        self.current_pos["x"] = content["CurLogicX"]
-                        self.current_pos["y"] = content["CurLogicY"]
+                        self.current_pos["x"] = info["CurLogicX"]
+                        self.current_pos["y"] = info["CurLogicY"]
                         telemetry_updated = True
 
                 # Battery and TaskMode telemetry
@@ -144,9 +150,10 @@ class Dispatcher:
             if not self.waiting_for_completion:
                 return # Not waiting for anything
 
-            result = content.get("OperationResult", -1)
-            x = content.get("CurLogicX")
-            y = content.get("CurLogicY")
+            info = content.get("Info", {})
+            result = info.get("OperationResult", -1)
+            x = info.get("CurLogicX")
+            y = info.get("CurLogicY")
 
             if result != 0:
                 self.log(f"[ERROR] Task failed with OperationResult: {result}. Pausing queue.")
@@ -171,8 +178,15 @@ class Dispatcher:
             self.log(f"[+] Task completed at X:{x}, Y:{y}")
             self.waiting_for_completion = False
             completed_action = self.queue_manager.pop_next() # Remove completed task
+
             if completed_action:
-                completed_action.status = "completed"
+                if self.loop_queue:
+                    # Reset status and put it back at the end of the queue
+                    completed_action.status = "pending"
+                    self.queue_manager.add_action(completed_action)
+                else:
+                    completed_action.status = "completed"
+
             self.last_sent_action = None
 
         self.notify_queue_update()
@@ -192,6 +206,14 @@ class Dispatcher:
             self.log("Queue paused.")
 
     def generate_payload(self, action):
+        seq_no = int(time.time())
+
+        if hasattr(action, 'payload'):
+            payload = action.payload.copy()
+            if "content" in payload:
+                payload["content"]["SeqNo"] = seq_no
+            return payload
+
         target_x, target_y = 0, 0
         link = []
 
@@ -234,8 +256,6 @@ class Dispatcher:
             op_type = 4
             pick_mode = 2
 
-        seq_no = int(time.time())
-
         payload = {
             "id": 10010,
             "content": {
@@ -264,7 +284,7 @@ class Dispatcher:
 
         try:
             payload = json.loads(json_str)
-            self.client.publish(self.pub_topic, json.dumps(payload), qos=1)
+            self.client.publish(self.pub_topic, json.dumps(payload, separators=(',', ':')), qos=0)
             self.log(f"[>>>] Sent Custom Payload (ID: {payload.get('id')})")
             return True
         except Exception as e:
@@ -287,11 +307,24 @@ class Dispatcher:
                 return
 
             # Set expectations
-            if next_action.manual_coords:
+            if next_action.action_type == "RAW_JSON":
+                # For raw JSON, we might not have a predictable destination.
+                # We can either parse it out of the raw payload, or just clear expectations.
+                # Let's try to extract EndX/EndY if they exist, otherwise don't enforce destination.
+                end_x = payload.get("content", {}).get("EndX")
+                end_y = payload.get("content", {}).get("EndY")
+                if end_x is not None and end_y is not None:
+                    self.expected_dest = {"x": end_x, "y": end_y}
+                else:
+                    self.expected_dest = None
+            elif next_action.manual_coords:
                 self.expected_dest = {"x": next_action.manual_coords["x"], "y": next_action.manual_coords["y"]}
             else:
-                target_node = self.graph.nodes[next_action.node_id]
-                self.expected_dest = {"x": target_node["x"], "y": target_node["y"]}
+                target_node = self.graph.nodes.get(next_action.node_id)
+                if target_node:
+                    self.expected_dest = {"x": target_node["x"], "y": target_node["y"]}
+                else:
+                    self.expected_dest = None
 
             self.waiting_for_completion = True
             self.last_sent_action = next_action
@@ -300,7 +333,7 @@ class Dispatcher:
 
         # Publish
         try:
-            self.client.publish(self.pub_topic, json.dumps(payload), qos=1)
+            self.client.publish(self.pub_topic, json.dumps(payload, separators=(',', ':')), qos=0)
             self.log(f"[>>>] Sending order SeqNo: {payload['content']['SeqNo']} - {next_action.action_type} to {next_action.node_id}")
         except Exception as e:
             self.log(f"Failed to publish: {e}")

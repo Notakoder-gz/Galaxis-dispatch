@@ -18,73 +18,6 @@ class Signals(QObject):
     queue_updated = Signal()
     telemetry_updated = Signal(float, float, int, int) # x, y, battery, status
 
-class GraphViewer(QGraphicsView):
-    node_clicked = Signal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.scene = QGraphicsScene()
-        self.setScene(self.scene)
-        self.setRenderHint(self.renderHints()) # Antialiasing etc if needed
-        self.nodes = {} # id -> item
-        self.robot_item = None
-
-    def update_robot(self, x, y):
-        scale = 50
-        px = x * scale
-        py = y * scale
-
-        if not self.robot_item:
-            radius = 12
-            self.robot_item = self.scene.addEllipse(
-                -radius, -radius, radius*2, radius*2,
-                QPen(Qt.black), QBrush(Qt.green)
-            )
-            self.robot_item.setZValue(10) # above nodes
-
-        self.robot_item.setPos(px, py)
-
-    def load_graph(self, graph):
-        self.scene.clear()
-        self.nodes.clear()
-
-        # Scale for visualization
-        scale = 50
-        radius = 15
-
-        # Draw edges
-        for node_id, neighbors in graph.edges.items():
-            n1 = graph.nodes[node_id]
-            for neighbor_id in neighbors:
-                n2 = graph.nodes[neighbor_id]
-                # draw line
-                line = self.scene.addLine(n1["x"]*scale, n1["y"]*scale,
-                                          n2["x"]*scale, n2["y"]*scale,
-                                          QPen(QColor(100, 100, 100), 2))
-                line.setZValue(-1)
-
-        # Draw nodes
-        for node_id, data in graph.nodes.items():
-            x = data["x"] * scale
-            y = data["y"] * scale
-
-            ellipse = self.scene.addEllipse(x - radius, y - radius, radius*2, radius*2,
-                                            QPen(Qt.black), QBrush(Qt.blue))
-            ellipse.setFlag(QGraphicsEllipseItem.ItemIsSelectable)
-            ellipse.setData(0, node_id)
-
-            text = self.scene.addText(node_id)
-            text.setPos(x - radius, y - radius - 20)
-
-            self.nodes[node_id] = ellipse
-
-    def mousePressEvent(self, event):
-        item = self.itemAt(event.pos())
-        if item and isinstance(item, QGraphicsEllipseItem):
-            node_id = item.data(0)
-            self.node_clicked.emit(node_id)
-        super().mousePressEvent(event)
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -134,14 +67,6 @@ class MainWindow(QMainWindow):
         conn_layout.addRow(self.connect_btn)
         left_layout.addWidget(conn_group)
 
-        # 2. Graph Controls
-        graph_group = QGroupBox("Graph Management")
-        graph_layout = QVBoxLayout(graph_group)
-        self.load_graph_btn = QPushButton("Load Graph JSON")
-        self.load_graph_btn.clicked.connect(self.load_graph_dialog)
-        graph_layout.addWidget(self.load_graph_btn)
-        left_layout.addWidget(graph_group)
-
         from PySide6.QtWidgets import QCheckBox
 
         # 3. Advanced Task Builder
@@ -175,14 +100,6 @@ class MainWindow(QMainWindow):
         self.add_macro_btn = QPushButton("Add Palletizing Job")
         self.add_macro_btn.clicked.connect(self.add_palletizing_job)
         task_layout.addRow(self.add_macro_btn)
-
-        # Quick Actions
-        self.quick_node_input = QLineEdit()
-        self.quick_node_input.setPlaceholderText("Click node on map...")
-        self.quick_move_btn = QPushButton("Quick Move to Node")
-        self.quick_move_btn.clicked.connect(self.add_quick_move)
-        task_layout.addRow("Target Node:", self.quick_node_input)
-        task_layout.addRow(self.quick_move_btn)
 
         left_layout.addWidget(task_group)
 
@@ -234,56 +151,64 @@ class MainWindow(QMainWindow):
         util_layout.addWidget(self.reset_amr_btn)
         left_layout.addWidget(util_group)
 
-        # Queue Control
+        # Raw JSON Task
+        raw_group = QGroupBox("Raw JSON Sequence Item")
+        raw_layout = QVBoxLayout(raw_group)
+        self.raw_json_input = QTextEdit()
+        self.raw_json_input.setPlaceholderText("Paste raw JSON for ONE step here...")
+        self.raw_json_input.setMaximumHeight(80)
+        self.add_raw_btn = QPushButton("Add Raw JSON to Queue")
+        self.add_raw_btn.clicked.connect(self.add_raw_json_task)
+        raw_layout.addWidget(self.raw_json_input)
+        raw_layout.addWidget(self.add_raw_btn)
+        left_layout.addWidget(raw_group)
+
+        # Right Panel: Queue & Logs
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        splitter.addWidget(right_panel)
+
+        # Queue Control & Telemetry Header
+        header_layout = QHBoxLayout()
+        self.telemetry_label = QLabel("Robot: Idle | Battery: --%")
+        self.telemetry_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(self.telemetry_label)
+
+        self.loop_cb = QCheckBox("Loop Queue")
+        self.loop_cb.toggled.connect(self.dispatcher.set_loop_queue)
+        header_layout.addWidget(self.loop_cb, alignment=Qt.AlignRight)
+        right_layout.addLayout(header_layout)
+
         qc_group = QGroupBox("Queue Controls")
         qc_layout = QHBoxLayout(qc_group)
         self.start_q_btn = QPushButton("Start/Resume")
         self.start_q_btn.clicked.connect(self.dispatcher.start_queue)
         self.pause_q_btn = QPushButton("Pause")
         self.pause_q_btn.clicked.connect(self.dispatcher.pause_queue)
-        self.clear_q_btn = QPushButton("Clear")
+        self.clear_q_btn = QPushButton("Clear Queue")
         self.clear_q_btn.clicked.connect(self.clear_queue)
         qc_layout.addWidget(self.start_q_btn)
         qc_layout.addWidget(self.pause_q_btn)
         qc_layout.addWidget(self.clear_q_btn)
-        left_layout.addWidget(qc_group)
-
-        # Center Panel: Visuals & Logs
-        center_panel = QWidget()
-        center_layout = QVBoxLayout(center_panel)
-        splitter.addWidget(center_panel)
-
-        # Visual Map
-        self.graph_viewer = GraphViewer()
-        self.graph_viewer.node_clicked.connect(self.on_node_clicked)
-
-        map_header = QHBoxLayout()
-        map_header.addWidget(QLabel("Visual Map"))
-        self.telemetry_label = QLabel("Robot: Idle | Battery: --%")
-        self.telemetry_label.setAlignment(Qt.AlignRight)
-        map_header.addWidget(self.telemetry_label)
-
-        center_layout.addLayout(map_header)
-        center_layout.addWidget(self.graph_viewer, stretch=2)
+        right_layout.addWidget(qc_group)
 
         # Queue List
-        center_layout.addWidget(QLabel("Task Queue"))
+        right_layout.addWidget(QLabel("Task Queue"))
         self.queue_list = QListWidget()
-        center_layout.addWidget(self.queue_list, stretch=1)
+        right_layout.addWidget(self.queue_list, stretch=2)
 
         # Log Console
-        center_layout.addWidget(QLabel("Log Console"))
+        right_layout.addWidget(QLabel("Log Console"))
         self.log_console = QTextEdit()
         self.log_console.setReadOnly(True)
-        center_layout.addWidget(self.log_console, stretch=1)
+        right_layout.addWidget(self.log_console, stretch=1)
 
-        splitter.setSizes([300, 700])
+        splitter.setSizes([400, 600])
 
     @Slot(float, float, int, int)
     def update_telemetry_ui(self, x, y, battery, status):
         status_str = "Moving/Executing" if status == 2 else "Idle"
         self.telemetry_label.setText(f"Robot: {status_str} | Battery: {battery}% | X:{x:.1f} Y:{y:.1f}")
-        self.graph_viewer.update_robot(x, y)
 
     @Slot(str)
     def append_log(self, msg):
@@ -304,25 +229,20 @@ class MainWindow(QMainWindow):
             self.dispatcher.disconnect()
             self.connect_btn.setText("Connect")
 
-    def load_graph_dialog(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open Graph JSON", "", "JSON Files (*.json)")
-        if file_name:
-            try:
-                self.graph.load_from_json(file_name)
-                self.graph_viewer.load_graph(self.graph)
-                self.signals.log_msg.emit(f"Graph loaded from {file_name}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load graph:\n{e}")
+    def add_raw_json_task(self):
+        json_str = self.raw_json_input.toPlainText()
+        if not json_str.strip():
+            return
 
-    @Slot(str)
-    def on_node_clicked(self, node_id):
-        # Auto fill the quick node input or other logic
-        self.quick_node_input.setText(node_id)
-        if not self.source_node_input.text():
-            self.source_node_input.setText(node_id)
-        elif not self.target_node_input.text():
-            self.target_node_input.setText(node_id)
-        self.signals.log_msg.emit(f"Node selected: {node_id}")
+        try:
+            payload = json.loads(json_str)
+            from src.jobs import RawJSONAction
+            self.queue_manager.add_action(RawJSONAction(payload))
+            self.signals.queue_updated.emit()
+            self.signals.log_msg.emit("Added Raw JSON to queue.")
+            self.raw_json_input.clear()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Invalid JSON:\n{e}")
 
     def add_palletizing_job(self):
         src = self.source_node_input.text()

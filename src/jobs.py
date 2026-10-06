@@ -1,3 +1,14 @@
+class RawJSONAction:
+    def __init__(self, payload):
+        self.payload = payload
+        self.action_type = "RAW_JSON"
+        self.node_id = "custom"
+        self.status = "pending"
+        self.manual_coords = None
+
+    def __repr__(self):
+        return f"[{self.status.upper()}] RAW JSON Payload"
+
 class Action:
     def __init__(self, action_type, node_id, height=0, manual_coords=None):
         # action_type: "MOVE", "PICK", "DROP"

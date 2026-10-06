@@ -3,7 +3,7 @@ name: Build Mini-RCS Executable
 on:
   push:
     branches:
-      - implement-mini-rcs-3747572129994666263
+      - main
     tags:
       - 'v*'
 
