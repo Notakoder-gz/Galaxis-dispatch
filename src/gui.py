@@ -39,23 +39,11 @@ class MainWindow(QMainWindow):
         self.setup_ui()
 
     def setup_ui(self):
+        self.setup_menu()
+
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
         self.setCentralWidget(main_widget)
-
-
-        # Guide Label
-        guide_text = (
-            "<b>Quick Guide:</b><br/>"
-            "1. Edit Host/Port/Topics if needed and click <b>Connect</b>.<br/>"
-            "2. Add tasks via <b>Manual Task</b>, <b>Raw JSON</b>, or <b>Palletizing</b>.<br/>"
-            "3. Click <b>Start/Resume</b> to begin processing the Queue.<br/>"
-            "4. If robot errors, click <b>Reset AMR (10120)</b> and then <b>Resume</b>."
-        )
-        guide_label = QLabel(guide_text)
-        guide_label.setStyleSheet("background-color: #f0f0f0; padding: 5px; border: 1px solid #ccc;")
-
-        main_layout.addWidget(guide_label)
 
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter, stretch=1)
@@ -65,6 +53,16 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_panel)
         splitter.addWidget(left_panel)
 
+        self.setup_panels(splitter, left_layout)
+
+    def setup_menu(self):
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("Help")
+
+        instructions_action = help_menu.addAction("Instructions")
+        instructions_action.triggered.connect(self.show_instructions)
+
+    def setup_panels(self, splitter, left_layout):
         # 1. Connection
         conn_group = QGroupBox("MQTT Connection")
         conn_layout = QFormLayout(conn_group)
@@ -263,6 +261,59 @@ class MainWindow(QMainWindow):
             self.dispatcher.disconnect()
             self.connect_btn.setText("Connect")
 
+    def show_instructions(self):
+        from PySide6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Mini-RCS Instructions")
+        dlg.resize(600, 500)
+
+        layout = QVBoxLayout(dlg)
+
+        tb = QTextBrowser()
+        tb.setOpenExternalLinks(True)
+        tb.setHtml(self.get_instructions_html())
+        layout.addWidget(tb)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+
+        dlg.exec()
+
+    def get_instructions_html(self):
+        return """
+        <h2>Mini-RCS Operator Guide</h2>
+
+        <h3>1. Connection & Setup</h3>
+        <p>Enter the IP address of the robot (or SSH tunnel) and the correct MQTT port. If your robot uses different MQTT topics for status and server commands, you can edit them here. Click <b>Connect</b> to start listening to the robot's telemetry.</p>
+
+        <h3>2. Map & Nodes</h3>
+        <p>By default, the application runs in "Graph-less" mode. If you want to dispatch the robot using Node IDs (e.g. Node "11"), you must click <b>Load KUKA Map JSON</b> and select the map dump from the robot. The system will parse the <code>logicX</code>, <code>logicY</code>, and paths to enable A* routing.</p>
+
+        <h3>3. Adding Tasks to the Queue</h3>
+        <p>The system is a sequential task dispatcher. You build a list of tasks, and it executes them one-by-one:</p>
+        <ul>
+            <li><b>Manual Task (Graph-less):</b> Send the robot to explicit X/Y logical coordinates. You can choose Move, Pick, or Drop.</li>
+            <li><b>Advanced Palletizing:</b> Automatically generates a sequence of "Move -> Pick -> Move -> Drop" tasks to stack items. You can use standard Node IDs (if a map is loaded) or check the "Use Manual Coordinates" box to provide raw X,Y pairs (like "0,1").</li>
+            <li><b>Raw JSON:</b> Paste a completely custom JSON payload (e.g., from a test dump) to add it as a step in the queue. The dispatcher will inject the correct <code>SeqNo</code> automatically.</li>
+        </ul>
+
+        <h3>4. Queue Controls</h3>
+        <ul>
+            <li><b>Start/Resume:</b> Begins publishing the top-most pending task to the robot.</li>
+            <li><b>Pause:</b> Halts the queue. The currently executing task will finish, but the next task will not be sent.</li>
+            <li><b>Edit Queue:</b> Use the ▲, ▼, and Delete buttons to modify pending tasks without having to clear the whole queue.</li>
+            <li><b>Loop Queue:</b> When checked, completed tasks are moved back to the bottom of the queue instead of being deleted, allowing infinite test loops.</li>
+        </ul>
+
+        <h3>5. Error Handling & Utilities</h3>
+        <ul>
+            <li><b>Preview Next Action:</b> Shows the exact JSON payload that will be sent for the next task in the queue.</li>
+            <li><b>Reset AMR Error (10120):</b> If the robot rejects an order or enters an error state, click this. It bypasses the queue, instantly sends a Reset Payload (SeqNo: 0), and clears the "Failed" task from the queue so you can safely click Resume.</li>
+            <li><b>Send Custom JSON:</b> Instantly publishes the provided raw JSON payload directly to the robot, completely bypassing the queue.</li>
+        </ul>
+        """
+
     def load_graph_dialog(self):
         from PySide6.QtWidgets import QFileDialog
         file_name, _ = QFileDialog.getOpenFileName(self, "Open KUKA Map JSON", "", "JSON Files (*.json)")
@@ -374,6 +425,9 @@ class MainWindow(QMainWindow):
             with self.dispatcher.lock:
                 self.dispatcher.waiting_for_completion = False
                 # Discard the failed item entirely from dispatcher state so queue can proceed normally
+                if self.dispatcher.last_sent_action:
+                    # Pop the failed item from the actual queue so it doesn't retry infinitely
+                    self.queue_manager.pop_next()
                 self.dispatcher.last_sent_action = None
             self.signals.queue_updated.emit()
         else:
@@ -413,12 +467,13 @@ class MainWindow(QMainWindow):
         row = self.queue_list.currentRow()
         if row < 0:
             return None
-        # Adjust for top "executing" item
-        if self.dispatcher.last_sent_action:
+        # The visual list row mapping perfectly aligns with the underlying queue manager list.
+        # However, we must prevent edits to the currently executing task if it is visibly displayed at row 0.
+        if self.dispatcher.last_sent_action and self.dispatcher.last_sent_action.status != "completed":
             if row == 0:
                 QMessageBox.warning(self, "Warning", "Cannot modify the currently executing task.")
                 return None
-            return row - 1
+            return row
         return row
 
     def clear_queue(self):
