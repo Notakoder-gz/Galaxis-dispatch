@@ -8,22 +8,61 @@ class Graph:
         self.edges = {}  # id -> [connected_ids]
 
     def load_from_json(self, filepath):
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
         self.nodes = {}
-        for node in data.get("nodes", []):
-            self.nodes[node["id"]] = {"x": node["logic_x"], "y": node["logic_y"]}
-
         self.edges = {}
+
+        # Check if this is a standard KUKA map format
+        if "businessMap" in data and isinstance(data["businessMap"], list) and len(data["businessMap"]) > 0:
+            b_map = data["businessMap"][0]
+            map_data = b_map.get("mapData", [])
+            for item in map_data:
+                if item.get("type") == "CODE":
+                    node_id = str(item.get("id"))
+                    lx = item.get("logicX")
+                    ly = item.get("logicY")
+                    if lx is not None and ly is not None:
+                        self.nodes[node_id] = {"x": lx, "y": ly}
+
+            # Parse edges from inSitePathIndex (connected nodes)
+            site_index = b_map.get("inSitePathIndex", {})
+            for start_node, paths in site_index.items():
+                start_node = str(start_node)
+                if start_node not in self.edges:
+                    self.edges[start_node] = []
+
+                # To find destination nodes, we look at the road IDs in paths
+                # and see where they lead using directionGroup
+                for road_id in paths:
+                    # Find road item
+                    for item in map_data:
+                        if item.get("id") == road_id and item.get("type") == "ROAD":
+                            for dg in item.get("directionGroup", []):
+                                if str(dg.get("startSite")) == start_node:
+                                    end_site = str(dg.get("endSite"))
+                                    if end_site not in self.edges[start_node]:
+                                        self.edges[start_node].append(end_site)
+                                        # Also add reverse connection for undirected graph
+                                        if end_site not in self.edges:
+                                            self.edges[end_site] = []
+                                        if start_node not in self.edges[end_site]:
+                                            self.edges[end_site].append(start_node)
+            return
+
+        # Fallback to simple generic format
+        for node in data.get("nodes", []):
+            self.nodes[str(node["id"])] = {"x": node["logic_x"], "y": node["logic_y"]}
+
         for edge in data.get("edges", []):
-            u, v = edge[0], edge[1]
+            u, v = str(edge[0]), str(edge[1])
             if u not in self.edges:
                 self.edges[u] = []
             if v not in self.edges:
                 self.edges[v] = []
             self.edges[u].append(v)
-            self.edges[v].append(u) # Assuming undirected graph for AMRs generally
+            self.edges[v].append(u)
 
     def heuristic(self, node_a, node_b):
         # Manhattan distance

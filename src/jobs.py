@@ -99,6 +99,21 @@ class QueueManager:
                 return self.queue.pop(0)
             return None
 
+    def remove_action(self, index):
+        with self.lock:
+            if 0 <= index < len(self.queue):
+                return self.queue.pop(index)
+        return None
+
+    def move_action(self, index, offset):
+        with self.lock:
+            new_index = index + offset
+            if 0 <= index < len(self.queue) and 0 <= new_index < len(self.queue):
+                # Swap elements
+                self.queue[index], self.queue[new_index] = self.queue[new_index], self.queue[index]
+                return new_index
+        return index
+
     def clear(self):
         with self.lock:
             self.queue.clear()

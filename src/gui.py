@@ -40,11 +40,25 @@ class MainWindow(QMainWindow):
 
     def setup_ui(self):
         main_widget = QWidget()
-        main_layout = QHBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
         self.setCentralWidget(main_widget)
 
+
+        # Guide Label
+        guide_text = (
+            "<b>Quick Guide:</b><br/>"
+            "1. Edit Host/Port/Topics if needed and click <b>Connect</b>.<br/>"
+            "2. Add tasks via <b>Manual Task</b>, <b>Raw JSON</b>, or <b>Palletizing</b>.<br/>"
+            "3. Click <b>Start/Resume</b> to begin processing the Queue.<br/>"
+            "4. If robot errors, click <b>Reset AMR (10120)</b> and then <b>Resume</b>."
+        )
+        guide_label = QLabel(guide_text)
+        guide_label.setStyleSheet("background-color: #f0f0f0; padding: 5px; border: 1px solid #ccc;")
+
+        main_layout.addWidget(guide_label)
+
         splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, stretch=1)
 
         # Left Panel: Controls
         left_panel = QWidget()
@@ -68,6 +82,14 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(conn_group)
 
         from PySide6.QtWidgets import QCheckBox
+
+        # 2. Graph Controls
+        graph_group = QGroupBox("Map & Nodes")
+        graph_layout = QVBoxLayout(graph_group)
+        self.load_graph_btn = QPushButton("Load KUKA Map JSON")
+        self.load_graph_btn.clicked.connect(self.load_graph_dialog)
+        graph_layout.addWidget(self.load_graph_btn)
+        left_layout.addWidget(graph_group)
 
         # 3. Advanced Task Builder
         task_group = QGroupBox("Advanced Task Builder (Palletizing)")
@@ -193,7 +215,19 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(qc_group)
 
         # Queue List
-        right_layout.addWidget(QLabel("Task Queue"))
+        queue_header_layout = QHBoxLayout()
+        queue_header_layout.addWidget(QLabel("Task Queue"))
+        self.q_up_btn = QPushButton("▲")
+        self.q_up_btn.clicked.connect(lambda: self.move_q_item(-1))
+        self.q_down_btn = QPushButton("▼")
+        self.q_down_btn.clicked.connect(lambda: self.move_q_item(1))
+        self.q_del_btn = QPushButton("Delete Selected")
+        self.q_del_btn.clicked.connect(self.delete_q_item)
+        queue_header_layout.addWidget(self.q_up_btn)
+        queue_header_layout.addWidget(self.q_down_btn)
+        queue_header_layout.addWidget(self.q_del_btn)
+
+        right_layout.addLayout(queue_header_layout)
         self.queue_list = QListWidget()
         right_layout.addWidget(self.queue_list, stretch=2)
 
@@ -228,6 +262,16 @@ class MainWindow(QMainWindow):
         else:
             self.dispatcher.disconnect()
             self.connect_btn.setText("Connect")
+
+    def load_graph_dialog(self):
+        from PySide6.QtWidgets import QFileDialog
+        file_name, _ = QFileDialog.getOpenFileName(self, "Open KUKA Map JSON", "", "JSON Files (*.json)")
+        if file_name:
+            try:
+                self.dispatcher.graph.load_from_json(file_name)
+                self.signals.log_msg.emit(f"Map loaded from {file_name}. Nodes available: {len(self.dispatcher.graph.nodes)}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load map:\n{e}")
 
     def add_raw_json_task(self):
         json_str = self.raw_json_input.toPlainText()
@@ -329,8 +373,8 @@ class MainWindow(QMainWindow):
             # Clear dispatcher waiting state to allow queue to resume if user clicks Start/Resume
             with self.dispatcher.lock:
                 self.dispatcher.waiting_for_completion = False
-                if self.dispatcher.last_sent_action:
-                    self.dispatcher.last_sent_action.status = "failed"
+                # Discard the failed item entirely from dispatcher state so queue can proceed normally
+                self.dispatcher.last_sent_action = None
             self.signals.queue_updated.emit()
         else:
             QMessageBox.warning(self, "Error", "Failed to send reset command.")
@@ -349,6 +393,34 @@ class MainWindow(QMainWindow):
         formatted_json = json.dumps(payload, indent=4)
         QMessageBox.information(self, "Order Preview", formatted_json)
 
+    def move_q_item(self, offset):
+        idx = self._get_selected_queue_index()
+        if idx is not None:
+            new_idx = self.queue_manager.move_action(idx, offset)
+            self.signals.queue_updated.emit()
+
+            # Select new index taking into account the extra row for executing task if present
+            visual_offset = 1 if self.dispatcher.last_sent_action else 0
+            self.queue_list.setCurrentRow(new_idx + visual_offset)
+
+    def delete_q_item(self):
+        idx = self._get_selected_queue_index()
+        if idx is not None:
+            self.queue_manager.remove_action(idx)
+            self.signals.queue_updated.emit()
+
+    def _get_selected_queue_index(self):
+        row = self.queue_list.currentRow()
+        if row < 0:
+            return None
+        # Adjust for top "executing" item
+        if self.dispatcher.last_sent_action:
+            if row == 0:
+                QMessageBox.warning(self, "Warning", "Cannot modify the currently executing task.")
+                return None
+            return row - 1
+        return row
+
     def clear_queue(self):
         self.queue_manager.clear()
         self.signals.queue_updated.emit()
@@ -356,6 +428,13 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def update_queue_ui(self):
+        if self.dispatcher.is_paused:
+            self.pause_q_btn.setText("Queue is PAUSED")
+            self.pause_q_btn.setStyleSheet("background-color: orange;")
+        else:
+            self.pause_q_btn.setText("Pause")
+            self.pause_q_btn.setStyleSheet("")
+
         self.queue_list.clear()
 
         # If there is a last sent action, always show it at the top.
